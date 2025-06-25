@@ -1,3 +1,0 @@
-../Core/Src/stm32f4_encoder.c:9:6:Encoder_Init	1
-../Core/Src/stm32f4_encoder.c:18:9:Encoder_GetPosition	2
-../Core/Src/stm32f4_encoder.c:37:9:Encoder_GetSpeed	1

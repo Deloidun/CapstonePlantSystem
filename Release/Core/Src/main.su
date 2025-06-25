@@ -1,0 +1,11 @@
+../Core/Src/main.c:179:6:SystemClock_Config	88	static,ignoring_inline_asm
+../Core/Src/main.c:617:6:Encoder_Init	8	static
+../Core/Src/main.c:625:6:Motor_PWM_Init	8	static
+../Core/Src/main.c:632:6:Motor_SetSpeed	0	static
+../Core/Src/main.c:639:6:Motor_SetSpeedAndDirection	0	static
+../Core/Src/main.c:655:9:Encoder_GetPosition	0	static
+../Core/Src/main.c:661:6:Encoder_ResetPosition	0	static
+../Core/Src/main.c:666:7:CalculateTravelDistance	8	static
+../Core/Src/main.c:97:5:main	112	static,ignoring_inline_asm
+../Core/Src/main.c:679:5:_write	12	static,ignoring_inline_asm
+../Core/Src/main.c:696:6:Error_Handler	0	static,ignoring_inline_asm

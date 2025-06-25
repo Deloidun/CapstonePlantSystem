@@ -22,7 +22,9 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include <stdio.h>
+#include <string.h>
+#include <math.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -47,12 +49,17 @@ I2S_HandleTypeDef hi2s3;
 
 SPI_HandleTypeDef hspi1;
 
+TIM_HandleTypeDef htim1;
 TIM_HandleTypeDef htim3;
+TIM_HandleTypeDef htim9;
 
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
-
+#define WHEEL_RADIUS_CM 30.0
+#define GEAR_RATIO 30.0
+#define ENCODER_PULSES_PER_REVOLUTION 330.0
+#define TARGET_DISTANCE_CM 400.0 // 4 meters in cm
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -60,12 +67,22 @@ void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_I2C1_Init(void);
 static void MX_I2S3_Init(void);
-static void MX_SPI1_Init(void);
 static void MX_USART2_UART_Init(void);
 static void MX_TIM3_Init(void);
+static void MX_SPI1_Init(void);
+static void MX_TIM1_Init(void);
+static void MX_TIM9_Init(void);
 void MX_USB_HOST_Process(void);
 
 /* USER CODE BEGIN PFP */
+void Encoder_Init(void);
+int32_t Encoder_GetPosition(void);
+void Encoder_ResetPosition(void);
+float CalculateTravelDistance(int32_t encoderCounts);
+void Motor_PWM_Init(void);
+void Motor_SetSpeedAndDirection(uint8_t speed, uint8_t direction);
+
+
 
 /* USER CODE END PFP */
 
@@ -105,11 +122,20 @@ int main(void)
   MX_GPIO_Init();
   MX_I2C1_Init();
   MX_I2S3_Init();
-  MX_SPI1_Init();
   MX_USB_HOST_Init();
   MX_USART2_UART_Init();
   MX_TIM3_Init();
+  MX_SPI1_Init();
+  MX_TIM1_Init();
+  MX_TIM9_Init();
   /* USER CODE BEGIN 2 */
+
+  // Initialize the encoder
+  Encoder_Init();
+  Motor_PWM_Init();
+
+  int32_t encoderCounts = 0;
+  float travelDistance = 0.0;
 
   /* USER CODE END 2 */
 
@@ -121,6 +147,41 @@ int main(void)
     MX_USB_HOST_Process();
 
     /* USER CODE BEGIN 3 */
+    if (encoderCounts > 30000){
+      	 __HAL_TIM_SET_COUNTER(&htim1, 0);
+      }
+
+    encoderCounts = Encoder_GetPosition();
+    travelDistance = CalculateTravelDistance(encoderCounts);
+
+
+    // Check if the target distance is reached
+    if (travelDistance >= TARGET_DISTANCE_CM)
+    {
+        // Stop the motor briefly
+        Motor_SetSpeedAndDirection(0, 0);
+        HAL_Delay(500);
+
+
+
+        // Reverse the motor direction to go back to 0 cm
+        Motor_SetSpeedAndDirection(50, 1);
+    }
+    else if (travelDistance <= 0.0 )
+    {
+        // Stop the motor briefly
+        Motor_SetSpeedAndDirection(0, 0);
+        HAL_Delay(500);
+
+        // Set the motor direction to forward to go back to 400 cm
+        Motor_SetSpeedAndDirection(50, 0);
+    }
+
+    // Print the travel distance
+    printf("Raw Encoder Counts: %ld\r\n", encoderCounts);
+    printf("Travel Distance: %.2f cm\r\n", travelDistance);
+    // Add a small delay
+    HAL_Delay(100);
   }
   /* USER CODE END 3 */
 }
@@ -261,7 +322,7 @@ static void MX_SPI1_Init(void)
   hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;
   hspi1.Init.CLKPhase = SPI_PHASE_1EDGE;
   hspi1.Init.NSS = SPI_NSS_SOFT;
-  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_8;
+  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_2;
   hspi1.Init.FirstBit = SPI_FIRSTBIT_MSB;
   hspi1.Init.TIMode = SPI_TIMODE_DISABLE;
   hspi1.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
@@ -273,6 +334,56 @@ static void MX_SPI1_Init(void)
   /* USER CODE BEGIN SPI1_Init 2 */
 
   /* USER CODE END SPI1_Init 2 */
+
+}
+
+/**
+  * @brief TIM1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM1_Init(void)
+{
+
+  /* USER CODE BEGIN TIM1_Init 0 */
+
+  /* USER CODE END TIM1_Init 0 */
+
+  TIM_Encoder_InitTypeDef sConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM1_Init 1 */
+
+  /* USER CODE END TIM1_Init 1 */
+  htim1.Instance = TIM1;
+  htim1.Init.Prescaler = 0;
+  htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim1.Init.Period = 65535;
+  htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim1.Init.RepetitionCounter = 0;
+  htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
+  sConfig.EncoderMode = TIM_ENCODERMODE_TI12;
+  sConfig.IC1Polarity = TIM_ICPOLARITY_RISING;
+  sConfig.IC1Selection = TIM_ICSELECTION_DIRECTTI;
+  sConfig.IC1Prescaler = TIM_ICPSC_DIV1;
+  sConfig.IC1Filter = 10;
+  sConfig.IC2Polarity = TIM_ICPOLARITY_RISING;
+  sConfig.IC2Selection = TIM_ICSELECTION_DIRECTTI;
+  sConfig.IC2Prescaler = TIM_ICPSC_DIV1;
+  sConfig.IC2Filter = 10;
+  if (HAL_TIM_Encoder_Init(&htim1, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim1, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM1_Init 2 */
+
+  /* USER CODE END TIM1_Init 2 */
 
 }
 
@@ -319,6 +430,52 @@ static void MX_TIM3_Init(void)
   /* USER CODE BEGIN TIM3_Init 2 */
 
   /* USER CODE END TIM3_Init 2 */
+
+}
+
+/**
+  * @brief TIM9 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM9_Init(void)
+{
+
+  /* USER CODE BEGIN TIM9_Init 0 */
+
+  /* USER CODE END TIM9_Init 0 */
+
+  TIM_OC_InitTypeDef sConfigOC = {0};
+
+  /* USER CODE BEGIN TIM9_Init 1 */
+
+  /* USER CODE END TIM9_Init 1 */
+  htim9.Instance = TIM9;
+  htim9.Init.Prescaler = 0;
+  htim9.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim9.Init.Period = 65535;
+  htim9.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim9.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_PWM_Init(&htim9) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sConfigOC.OCMode = TIM_OCMODE_PWM1;
+  sConfigOC.Pulse = 0;
+  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+  if (HAL_TIM_PWM_ConfigChannel(&htim9, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_ConfigChannel(&htim9, &sConfigOC, TIM_CHANNEL_2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM9_Init 2 */
+
+  /* USER CODE END TIM9_Init 2 */
+  HAL_TIM_MspPostInit(&htim9);
 
 }
 
@@ -416,11 +573,11 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(B1_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : BOOT1_Pin */
-  GPIO_InitStruct.Pin = BOOT1_Pin;
+  /*Configure GPIO pins : BOOT1_Pin PB13 */
+  GPIO_InitStruct.Pin = BOOT1_Pin|GPIO_PIN_13;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(BOOT1_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
   /*Configure GPIO pin : CLK_IN_Pin */
   GPIO_InitStruct.Pin = CLK_IN_Pin;
@@ -464,7 +621,75 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+void Encoder_Init(void)
+{
+    // Start Timer 1 in encoder mode
+    HAL_TIM_Encoder_Start(&htim1, TIM_CHANNEL_ALL);
+    // Reset the counter to zero
+    __HAL_TIM_SET_COUNTER(&htim1, 0);
+}
+// Function to initialize PWM
+void Motor_PWM_Init(void)
+{
+    HAL_TIM_Base_Start(&htim9);
+    HAL_TIM_PWM_Start(&htim9, TIM_CHANNEL_1); // Start PWM on TIM2 Channel 1
+    HAL_TIM_PWM_Start(&htim9, TIM_CHANNEL_2); // Start PWM for RPWM
+}
 
+// Function to set motor speed (0-100%)
+
+
+// Function to set motor direction
+void Motor_SetSpeedAndDirection(uint8_t speed, uint8_t direction)
+{
+    if (speed > 100) speed = 100; // Limit speed to 100%
+
+    if (direction == 0) // Forward
+    {
+        __HAL_TIM_SET_COMPARE(&htim9, TIM_CHANNEL_1, speed * (htim9.Init.Period + 1) / 100); // LPWM
+        __HAL_TIM_SET_COMPARE(&htim9, TIM_CHANNEL_2, 0); // RPWM
+    }
+    else // Reverse
+    {
+    	__HAL_TIM_SET_COMPARE(&htim9, TIM_CHANNEL_1, 0); // LPWM
+    	__HAL_TIM_SET_COMPARE(&htim9, TIM_CHANNEL_2, speed * (htim9.Init.Period + 1) / 100); // RPWM
+    }
+}
+
+int32_t Encoder_GetPosition(void)
+{
+    return __HAL_TIM_GET_COUNTER(&htim1);
+}
+
+
+void Encoder_ResetPosition(void)
+{
+
+}
+float CalculateTravelDistance(int32_t encoderCounts)
+{
+    // Calculate the wheel circumference
+    float wheelCircumference = 2 * M_PI * WHEEL_RADIUS_CM;
+
+    // Calculate the number of wheel revolutions
+    float wheelRevolutions = (float)encoderCounts / ENCODER_PULSES_PER_REVOLUTION / GEAR_RATIO;
+
+    // Calculate the travel distance
+    float travelDistance = wheelRevolutions * wheelCircumference;
+
+    return travelDistance; // Distance in cm
+}
+int _write(int file, char *ptr, int len)
+{
+  (void)file;
+  int DataIdx;
+
+  for (DataIdx = 0; DataIdx < len; DataIdx++)
+  {
+    ITM_SendChar(*ptr++);
+  }
+  return len;
+}
 /* USER CODE END 4 */
 
 /**
