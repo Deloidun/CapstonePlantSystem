@@ -149,6 +149,7 @@ int main(void)
     /* USER CODE BEGIN 3 */
     if (encoderCounts > 30000){
       	 __HAL_TIM_SET_COUNTER(&htim1, 0);
+
       }
 
     encoderCounts = Encoder_GetPosition();
@@ -160,7 +161,6 @@ int main(void)
     {
         // Stop the motor briefly
         Motor_SetSpeedAndDirection(0, 0);
-        HAL_Delay(500);
 
 
 
@@ -171,7 +171,6 @@ int main(void)
     {
         // Stop the motor briefly
         Motor_SetSpeedAndDirection(0, 0);
-        HAL_Delay(500);
 
         // Set the motor direction to forward to go back to 400 cm
         Motor_SetSpeedAndDirection(50, 0);
