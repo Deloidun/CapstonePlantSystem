@@ -25,6 +25,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
+#include "tmc2209.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -52,14 +53,49 @@ SPI_HandleTypeDef hspi1;
 TIM_HandleTypeDef htim1;
 TIM_HandleTypeDef htim3;
 TIM_HandleTypeDef htim9;
+TIM_HandleTypeDef htim10;
 
 UART_HandleTypeDef huart2;
+UART_HandleTypeDef huart3;
 
 /* USER CODE BEGIN PV */
 #define WHEEL_RADIUS_CM 30.0
 #define GEAR_RATIO 30.0
 #define ENCODER_PULSES_PER_REVOLUTION 330.0
 #define TARGET_DISTANCE_CM 400.0 // 4 meters in cm
+
+#define STEPS_PER_REV        200     // Motor full steps per rev
+#define MICROSTEPPING        16      // Set in CHOPCONF
+#define LEADSCREW_PITCH_MM   2.0f    // mm per revolution
+#define STEPS_PER_MM  ((STEPS_PER_REV * MICROSTEPPING) / LEADSCREW_PITCH_MM)
+
+#define DIR_PORT             GPIOD
+#define DIR_PIN              GPIO_PIN_13
+
+#define STEP_PULSE_FREQ_HZ   1000    // 1 kHz = 1000 steps/sec
+
+
+typedef enum {
+    STATE_DC_FORWARD,
+    STATE_STEPPER_DOWN_UP,
+    STATE_DC_BACKWARD,
+    STATE_STEPPER_RETURN
+} SystemState;
+
+SystemState currentState = STATE_DC_FORWARD;
+uint32_t stepper_start_time = 0;
+uint8_t stepper_running = 0;
+
+typedef enum {
+    STEPPER_IDLE,
+    STEPPER_MOVING_DOWN,
+    STEPPER_MOVING_UP
+} StepperPhase;
+
+StepperPhase stepperPhase = STEPPER_IDLE;
+
+
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -72,6 +108,8 @@ static void MX_TIM3_Init(void);
 static void MX_SPI1_Init(void);
 static void MX_TIM1_Init(void);
 static void MX_TIM9_Init(void);
+static void MX_USART3_UART_Init(void);
+static void MX_TIM10_Init(void);
 void MX_USB_HOST_Process(void);
 
 /* USER CODE BEGIN PFP */
@@ -81,7 +119,13 @@ void Encoder_ResetPosition(void);
 float CalculateTravelDistance(int32_t encoderCounts);
 void Motor_PWM_Init(void);
 void Motor_SetSpeedAndDirection(uint8_t speed, uint8_t direction);
+void Stepper_Init(void);
+void Stepper_SetDirection(uint8_t dir);
+void Stepper_Start(uint32_t duration_ms);
 
+void Stepper_Update();
+
+//void Stepper_MoveDistance_mm(float mm);
 
 
 /* USER CODE END PFP */
@@ -128,14 +172,24 @@ int main(void)
   MX_SPI1_Init();
   MX_TIM1_Init();
   MX_TIM9_Init();
+  MX_USART3_UART_Init();
+  MX_TIM10_Init();
   /* USER CODE BEGIN 2 */
 
   // Initialize the encoder
   Encoder_Init();
   Motor_PWM_Init();
+  TMC2209_Init();  // 🛠️ Init TMC2209 driver
+  Stepper_Init();
+  HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12, GPIO_PIN_RESET);  // Enable TMC2209
+  HAL_Delay(100);  // wait for stable power
+
+
+
 
   int32_t encoderCounts = 0;
   float travelDistance = 0.0;
+
 
   /* USER CODE END 2 */
 
@@ -147,38 +201,83 @@ int main(void)
     MX_USB_HOST_Process();
 
     /* USER CODE BEGIN 3 */
-    if (encoderCounts > 30000){
-      	 __HAL_TIM_SET_COUNTER(&htim1, 0);
+	if (encoderCounts > 30000){
+		 __HAL_TIM_SET_COUNTER(&htim1, 0);
 
-      }
+	  }
 
-    encoderCounts = Encoder_GetPosition();
-    travelDistance = CalculateTravelDistance(encoderCounts);
+	encoderCounts = Encoder_GetPosition();
+	travelDistance = CalculateTravelDistance(encoderCounts);
 
+	Stepper_Update();  // always call this
 
-    // Check if the target distance is reached
-    if (travelDistance >= TARGET_DISTANCE_CM)
-    {
-        // Stop the motor briefly
-        Motor_SetSpeedAndDirection(0, 0);
+	   switch (currentState)
+	   {
+		   case STATE_DC_FORWARD:
+			   Motor_SetSpeedAndDirection(50, 0); // forward
+			   if (travelDistance >= TARGET_DISTANCE_CM)
+			   {
+				   Motor_SetSpeedAndDirection(0, 0);  // stop DC
+				   currentState = STATE_STEPPER_DOWN_UP;
+				   stepperPhase = STEPPER_IDLE;
+			   }
+			   break;
 
+		   case STATE_STEPPER_DOWN_UP:
+			   if (stepperPhase == STEPPER_IDLE)
+			   {
+				   Stepper_SetDirection(0);   // down
+				   Stepper_Start(2000);
+				   stepperPhase = STEPPER_MOVING_DOWN;
+			   }
+			   else if (stepperPhase == STEPPER_MOVING_DOWN && !stepper_running)
+			   {
+				   Stepper_SetDirection(1);   // up
+				   Stepper_Start(2000);
+				   stepperPhase = STEPPER_MOVING_UP;
+			   }
+			   else if (stepperPhase == STEPPER_MOVING_UP && !stepper_running)
+			   {
+				   stepperPhase = STEPPER_IDLE;
+				   currentState = STATE_DC_BACKWARD;
+			   }
+			   break;
 
+		   case STATE_DC_BACKWARD:
+			   Motor_SetSpeedAndDirection(50, 1); // backward
+			   if (travelDistance <= 0.0)
+			   {
+				   Motor_SetSpeedAndDirection(0, 0);
+				   currentState = STATE_STEPPER_RETURN;
+				   stepperPhase = STEPPER_IDLE;
+			   }
+			   break;
 
-        // Reverse the motor direction to go back to 0 cm
-        Motor_SetSpeedAndDirection(50, 1);
-    }
-    else if (travelDistance <= 0.0 )
-    {
-        // Stop the motor briefly
-        Motor_SetSpeedAndDirection(0, 0);
+		   case STATE_STEPPER_RETURN:
+			   if (stepperPhase == STEPPER_IDLE)
+			   {
+				   Stepper_SetDirection(0);   // down
+				   Stepper_Start(2000);
+				   stepperPhase = STEPPER_MOVING_DOWN;
+			   }
+			   else if (stepperPhase == STEPPER_MOVING_DOWN && !stepper_running)
+			   {
+				   Stepper_SetDirection(1);   // up
+				   Stepper_Start(2000);
+				   stepperPhase = STEPPER_MOVING_UP;
+			   }
+			   else if (stepperPhase == STEPPER_MOVING_UP && !stepper_running)
+			   {
+				   stepperPhase = STEPPER_IDLE;
+				   currentState = STATE_DC_FORWARD;  // Loop again
+			   }
+			   break;
+	   }
 
-        // Set the motor direction to forward to go back to 400 cm
-        Motor_SetSpeedAndDirection(50, 0);
-    }
+	//    // Print the travel distance
+			printf("Raw Encoder Counts: %ld\r\n", encoderCounts);
+			printf("Travel Distance: %.2f cm\r\n", travelDistance);
 
-    // Print the travel distance
-    printf("Raw Encoder Counts: %ld\r\n", encoderCounts);
-    printf("Travel Distance: %.2f cm\r\n", travelDistance);
     // Add a small delay
     HAL_Delay(100);
   }
@@ -479,6 +578,52 @@ static void MX_TIM9_Init(void)
 }
 
 /**
+  * @brief TIM10 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM10_Init(void)
+{
+
+  /* USER CODE BEGIN TIM10_Init 0 */
+
+  /* USER CODE END TIM10_Init 0 */
+
+  TIM_OC_InitTypeDef sConfigOC = {0};
+
+  /* USER CODE BEGIN TIM10_Init 1 */
+
+  /* USER CODE END TIM10_Init 1 */
+  htim10.Instance = TIM10;
+  htim10.Init.Prescaler = 0;
+  htim10.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim10.Init.Period = 65535;
+  htim10.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim10.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim10) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_Init(&htim10) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sConfigOC.OCMode = TIM_OCMODE_PWM1;
+  sConfigOC.Pulse = 0;
+  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+  if (HAL_TIM_PWM_ConfigChannel(&htim10, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM10_Init 2 */
+
+  /* USER CODE END TIM10_Init 2 */
+  HAL_TIM_MspPostInit(&htim10);
+
+}
+
+/**
   * @brief USART2 Initialization Function
   * @param None
   * @retval None
@@ -512,6 +657,39 @@ static void MX_USART2_UART_Init(void)
 }
 
 /**
+  * @brief USART3 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART3_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART3_Init 0 */
+
+  /* USER CODE END USART3_Init 0 */
+
+  /* USER CODE BEGIN USART3_Init 1 */
+
+  /* USER CODE END USART3_Init 1 */
+  huart3.Instance = USART3;
+  huart3.Init.BaudRate = 115200;
+  huart3.Init.WordLength = UART_WORDLENGTH_8B;
+  huart3.Init.StopBits = UART_STOPBITS_1;
+  huart3.Init.Parity = UART_PARITY_NONE;
+  huart3.Init.Mode = UART_MODE_TX_RX;
+  huart3.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart3.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_HalfDuplex_Init(&huart3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART3_Init 2 */
+
+  /* USER CODE END USART3_Init 2 */
+
+}
+
+/**
   * @brief GPIO Initialization Function
   * @param None
   * @retval None
@@ -538,11 +716,8 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(OTG_FS_PowerSwitchOn_GPIO_Port, OTG_FS_PowerSwitchOn_Pin, GPIO_PIN_SET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOD, LD4_Pin|LD3_Pin|LD5_Pin|LD6_Pin
+  HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12|GPIO_PIN_13|LD5_Pin|LD6_Pin
                           |Audio_RST_Pin, GPIO_PIN_RESET);
-
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_8, GPIO_PIN_RESET);
 
   /*Configure GPIO pin : CS_I2C_SPI_Pin */
   GPIO_InitStruct.Pin = CS_I2C_SPI_Pin;
@@ -586,21 +761,14 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Alternate = GPIO_AF5_SPI2;
   HAL_GPIO_Init(CLK_IN_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : LD4_Pin LD3_Pin LD5_Pin LD6_Pin
+  /*Configure GPIO pins : PD12 PD13 LD5_Pin LD6_Pin
                            Audio_RST_Pin */
-  GPIO_InitStruct.Pin = LD4_Pin|LD3_Pin|LD5_Pin|LD6_Pin
+  GPIO_InitStruct.Pin = GPIO_PIN_12|GPIO_PIN_13|LD5_Pin|LD6_Pin
                           |Audio_RST_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
-
-  /*Configure GPIO pin : PA8 */
-  GPIO_InitStruct.Pin = GPIO_PIN_8;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
   /*Configure GPIO pin : OTG_FS_OverCurrent_Pin */
   GPIO_InitStruct.Pin = OTG_FS_OverCurrent_Pin;
@@ -654,6 +822,48 @@ void Motor_SetSpeedAndDirection(uint8_t speed, uint8_t direction)
     	__HAL_TIM_SET_COMPARE(&htim9, TIM_CHANNEL_2, speed * (htim9.Init.Period + 1) / 100); // RPWM
     }
 }
+
+
+void Stepper_Init() {
+    // Set DIR pin (PD13) as output in CubeMX or here manually
+    HAL_TIM_Base_Start(&htim10);
+    // Start PWM for STEP generation
+    HAL_TIM_PWM_Start(&htim10, TIM_CHANNEL_1);
+    HAL_GPIO_WritePin(DIR_PORT, DIR_PIN, GPIO_PIN_RESET);  // Default direction
+}
+void Stepper_SetDirection(uint8_t dir) {
+    HAL_GPIO_WritePin(DIR_PORT, DIR_PIN, dir ? GPIO_PIN_SET : GPIO_PIN_RESET);
+}
+
+
+
+void Stepper_Start(uint32_t duration_ms)
+{
+    __HAL_TIM_SET_COMPARE(&htim10, TIM_CHANNEL_1, 500);
+    HAL_TIM_PWM_Start(&htim10, TIM_CHANNEL_1);
+
+    stepper_start_time = HAL_GetTick();
+    stepper_running = 1;
+}
+
+void Stepper_Update()
+{
+    if (stepper_running)
+    {
+        if (HAL_GetTick() - stepper_start_time >= 2000)
+        {
+            HAL_TIM_PWM_Stop(&htim10, TIM_CHANNEL_1);
+            stepper_running = 0;
+        }
+    }
+}
+
+
+
+//void Stepper_MoveDistance_mm(float mm) {
+//    uint32_t steps = (uint32_t)(mm * STEPS_PER_MM);
+//    Stepper_MoveSteps(steps);
+//}
 
 int32_t Encoder_GetPosition(void)
 {
