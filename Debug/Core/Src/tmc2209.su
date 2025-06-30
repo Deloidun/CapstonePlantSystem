@@ -1,0 +1,3 @@
+../Core/Src/tmc2209.c:7:16:tmc_crc	24	static
+../Core/Src/tmc2209.c:21:6:TMC2209_WriteRegister	24	static
+../Core/Src/tmc2209.c:35:6:TMC2209_Init	8	static
