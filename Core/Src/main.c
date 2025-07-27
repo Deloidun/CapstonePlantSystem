@@ -54,6 +54,7 @@ TIM_HandleTypeDef htim1;
 TIM_HandleTypeDef htim3;
 TIM_HandleTypeDef htim9;
 TIM_HandleTypeDef htim10;
+TIM_HandleTypeDef htim12;
 
 UART_HandleTypeDef huart2;
 UART_HandleTypeDef huart3;
@@ -73,7 +74,8 @@ UART_HandleTypeDef huart3;
 #define DIR_PIN              GPIO_PIN_13
 
 #define STEP_PULSE_FREQ_HZ   1000    // 1 kHz = 1000 steps/sec
-
+#define MOTOR2_DEFAULT_OFFSET 0    // Adjust this based on your motor characteristics
+#define MAX_SPEED_OFFSET 20        // Maximum allowed offset to prevent extreme differences
 
 typedef enum {
     STATE_DC_FORWARD,
@@ -94,6 +96,12 @@ typedef enum {
 
 StepperPhase stepperPhase = STEPPER_IDLE;
 
+uint8_t motor1_speed = 0;
+uint8_t motor2_speed = 0;
+uint8_t motor1_direction = 0;
+uint8_t motor2_direction = 0;
+int8_t motor2_offset = 0;  // Speed offset for motor 2 (-100 to +100)
+
 
 
 /* USER CODE END PV */
@@ -110,6 +118,7 @@ static void MX_TIM1_Init(void);
 static void MX_TIM9_Init(void);
 static void MX_USART3_UART_Init(void);
 static void MX_TIM10_Init(void);
+static void MX_TIM12_Init(void);
 void MX_USB_HOST_Process(void);
 
 /* USER CODE BEGIN PFP */
@@ -118,7 +127,16 @@ int32_t Encoder_GetPosition(void);
 void Encoder_ResetPosition(void);
 float CalculateTravelDistance(int32_t encoderCounts);
 void Motor_PWM_Init(void);
-void Motor_SetSpeedAndDirection(uint8_t speed, uint8_t direction);
+// Enhanced motor control functions with offset
+void Motor1_SetSpeedAndDirection(uint8_t speed, uint8_t direction);
+void Motor2_SetSpeedAndDirection(uint8_t speed, uint8_t direction);
+void Motors_SetSynchronizedSpeed(uint8_t speed, uint8_t direction);
+void Motors_SetSynchronizedSpeedWithOffset(uint8_t base_speed, uint8_t direction, int8_t motor2_offset);
+void Motors_SetMotor2Offset(int8_t offset);
+void Motors_Init(void);
+void Motors_EmergencyStop(void);
+void Motors_PrintStatus(void);
+
 void Stepper_Init(void);
 void Stepper_SetDirection(uint8_t dir);
 void Stepper_Start(uint32_t duration_ms);
@@ -174,6 +192,7 @@ int main(void)
   MX_TIM9_Init();
   MX_USART3_UART_Init();
   MX_TIM10_Init();
+  MX_TIM12_Init();
   /* USER CODE BEGIN 2 */
 
   // Initialize the encoder
@@ -214,10 +233,10 @@ int main(void)
 	   switch (currentState)
 	   {
 		   case STATE_DC_FORWARD:
-			   Motor_SetSpeedAndDirection(50, 0); // forward
+			   Motors_SetSynchronizedSpeedWithOffset(50,0,motor2_offset);
 			   if (travelDistance >= TARGET_DISTANCE_CM)
 			   {
-				   Motor_SetSpeedAndDirection(0, 0);  // stop DC
+				   Motors_EmergencyStop();
 				   currentState = STATE_STEPPER_DOWN_UP;
 				   stepperPhase = STEPPER_IDLE;
 			   }
@@ -244,10 +263,10 @@ int main(void)
 			   break;
 
 		   case STATE_DC_BACKWARD:
-			   Motor_SetSpeedAndDirection(50, 1); // backward
+			   Motors_SetSynchronizedSpeedWithOffset(50,1,motor2_offset);
 			   if (travelDistance <= 0.0)
 			   {
-				   Motor_SetSpeedAndDirection(0, 0);
+				   Motors_EmergencyStop();
 				   currentState = STATE_STEPPER_RETURN;
 				   stepperPhase = STEPPER_IDLE;
 			   }
@@ -274,9 +293,15 @@ int main(void)
 			   break;
 	   }
 
-	//    // Print the travel distance
-			printf("Raw Encoder Counts: %ld\r\n", encoderCounts);
-			printf("Travel Distance: %.2f cm\r\n", travelDistance);
+    // Print status every 10 cycles (1 second)
+    static uint8_t print_counter = 0;
+    if (++print_counter >= 10)
+    {
+        Motors_PrintStatus();
+        printf("Raw Encoder Counts: %ld\r\n", encoderCounts);
+        printf("Travel Distance: %.2f cm\r\n", travelDistance);
+        print_counter = 0;
+    }
 
     // Add a small delay
     HAL_Delay(100);
@@ -624,6 +649,52 @@ static void MX_TIM10_Init(void)
 }
 
 /**
+  * @brief TIM12 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM12_Init(void)
+{
+
+  /* USER CODE BEGIN TIM12_Init 0 */
+
+  /* USER CODE END TIM12_Init 0 */
+
+  TIM_OC_InitTypeDef sConfigOC = {0};
+
+  /* USER CODE BEGIN TIM12_Init 1 */
+
+  /* USER CODE END TIM12_Init 1 */
+  htim12.Instance = TIM12;
+  htim12.Init.Prescaler = 0;
+  htim12.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim12.Init.Period = 65535;
+  htim12.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim12.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_PWM_Init(&htim12) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sConfigOC.OCMode = TIM_OCMODE_PWM1;
+  sConfigOC.Pulse = 0;
+  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+  if (HAL_TIM_PWM_ConfigChannel(&htim12, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_ConfigChannel(&htim12, &sConfigOC, TIM_CHANNEL_2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM12_Init 2 */
+
+  /* USER CODE END TIM12_Init 2 */
+  HAL_TIM_MspPostInit(&htim12);
+
+}
+
+/**
   * @brief USART2 Initialization Function
   * @param None
   * @retval None
@@ -788,41 +859,123 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
-void Encoder_Init(void)
-{
-    // Start Timer 1 in encoder mode
-    HAL_TIM_Encoder_Start(&htim1, TIM_CHANNEL_ALL);
-    // Reset the counter to zero
-    __HAL_TIM_SET_COUNTER(&htim1, 0);
-}
 // Function to initialize PWM
 void Motor_PWM_Init(void)
 {
+    // Initialize TIM9 for Motor 1
     HAL_TIM_Base_Start(&htim9);
-    HAL_TIM_PWM_Start(&htim9, TIM_CHANNEL_1); // Start PWM on TIM2 Channel 1
-    HAL_TIM_PWM_Start(&htim9, TIM_CHANNEL_2); // Start PWM for RPWM
+    HAL_TIM_PWM_Start(&htim9, TIM_CHANNEL_1);
+    HAL_TIM_PWM_Start(&htim9, TIM_CHANNEL_2);
+    
+    // Initialize TIM12 for Motor 2
+    HAL_TIM_Base_Start(&htim12);
+    HAL_TIM_PWM_Start(&htim12, TIM_CHANNEL_1);
+    HAL_TIM_PWM_Start(&htim12, TIM_CHANNEL_2);
+    // Initialize variables
+    motor1_speed = 0;
+    motor2_speed = 0;
+    motor1_direction = 0;
+    motor2_direction = 0;
+    motor2_offset = 0;
 }
 
 // Function to set motor speed (0-100%)
 
 
-// Function to set motor direction
-void Motor_SetSpeedAndDirection(uint8_t speed, uint8_t direction)
+void Motor1_SetSpeedAndDirection(uint8_t speed, uint8_t direction)
 {
-    if (speed > 100) speed = 100; // Limit speed to 100%
-
+    if (speed > 100) speed = 100;
+    
     if (direction == 0) // Forward
     {
-        __HAL_TIM_SET_COMPARE(&htim9, TIM_CHANNEL_1, speed * (htim9.Init.Period + 1) / 100); // LPWM
-        __HAL_TIM_SET_COMPARE(&htim9, TIM_CHANNEL_2, 0); // RPWM
+        __HAL_TIM_SET_COMPARE(&htim9, TIM_CHANNEL_1, speed * (htim9.Init.Period + 1) / 100);
+        __HAL_TIM_SET_COMPARE(&htim9, TIM_CHANNEL_2, 0);
     }
     else // Reverse
     {
-    	__HAL_TIM_SET_COMPARE(&htim9, TIM_CHANNEL_1, 0); // LPWM
-    	__HAL_TIM_SET_COMPARE(&htim9, TIM_CHANNEL_2, speed * (htim9.Init.Period + 1) / 100); // RPWM
+        __HAL_TIM_SET_COMPARE(&htim9, TIM_CHANNEL_1, 0);
+        __HAL_TIM_SET_COMPARE(&htim9, TIM_CHANNEL_2, speed * (htim9.Init.Period + 1) / 100);
     }
+    
+    motor1_speed = speed;
+    motor1_direction = direction;
 }
 
+// Control Motor 2 independently
+void Motor2_SetSpeedAndDirection(uint8_t speed, uint8_t direction)
+{
+    if (speed > 100) speed = 100;
+    
+    if (direction == 0) // Forward
+    {
+        __HAL_TIM_SET_COMPARE(&htim12, TIM_CHANNEL_1, speed * (htim12.Init.Period + 1) / 100);
+        __HAL_TIM_SET_COMPARE(&htim12, TIM_CHANNEL_2, 0);
+    }
+    else // Reverse
+    {
+        __HAL_TIM_SET_COMPARE(&htim12, TIM_CHANNEL_1, 0);
+        __HAL_TIM_SET_COMPARE(&htim12, TIM_CHANNEL_2, speed * (htim12.Init.Period + 1) / 100);
+    }
+    
+    motor2_speed = speed;
+    motor2_direction = direction;
+}
+
+// Synchronized control with offset for fine-tuning
+void Motors_SetSynchronizedSpeedWithOffset(uint8_t base_speed, uint8_t direction, int8_t motor2_offset)
+{
+    // Calculate motor 2 speed with offset
+    int16_t motor2_speed_calc = base_speed + motor2_offset;
+    
+    // Clamp motor 2 speed to valid range
+    if (motor2_speed_calc > 100) motor2_speed_calc = 100;
+    if (motor2_speed_calc < 0) motor2_speed_calc = 0;
+    
+    uint8_t motor2_speed_final = (uint8_t)motor2_speed_calc;
+    
+    // Set both motors
+    Motor1_SetSpeedAndDirection(base_speed, direction);
+    Motor2_SetSpeedAndDirection(motor2_speed_final, direction);
+    
+    // Store the current offset
+    motor2_offset = motor2_offset;
+}
+
+void Motors_SetMotor2Offset(int8_t offset)
+{
+    // Clamp offset to reasonable range
+    if (offset > MAX_SPEED_OFFSET) offset = MAX_SPEED_OFFSET;
+    if (offset < -MAX_SPEED_OFFSET) offset = -MAX_SPEED_OFFSET;
+    
+    motor2_offset = offset;
+    
+    // If motors are currently running, update them with new offset
+    if (motor1_speed > 0 || motor2_speed > 0)
+    {
+        Motors_SetSynchronizedSpeedWithOffset(motor1_speed, motor1_direction, motor2_offset);
+    }
+}
+// Standard synchronized control (uses current offset)
+void Motors_SetSynchronizedSpeed(uint8_t speed, uint8_t direction)
+{
+    Motors_SetSynchronizedSpeedWithOffset(speed, direction, motor2_offset);
+}
+
+void Motors_EmergencyStop(void)
+{
+    Motor1_SetSpeedAndDirection(0, 0);
+    Motor2_SetSpeedAndDirection(0, 0);
+}
+// Print motor status for debugging
+void Motors_PrintStatus(void)
+{
+    printf("Motor Status - M1: %d%% %s, M2: %d%% %s (Offset: %+d)\r\n",
+           motor1_speed,
+           motor1_direction ? "REV" : "FWD",
+           motor2_speed,
+           motor2_direction ? "REV" : "FWD",
+           motor2_offset);
+}
 
 void Stepper_Init() {
     // Set DIR pin (PD13) as output in CubeMX or here manually
@@ -858,12 +1011,13 @@ void Stepper_Update()
     }
 }
 
-
-
-//void Stepper_MoveDistance_mm(float mm) {
-//    uint32_t steps = (uint32_t)(mm * STEPS_PER_MM);
-//    Stepper_MoveSteps(steps);
-//}
+void Encoder_Init(void)
+{
+    // Start Timer 1 in encoder mode
+    HAL_TIM_Encoder_Start(&htim1, TIM_CHANNEL_ALL);
+    // Reset the counter to zero
+    __HAL_TIM_SET_COUNTER(&htim1, 0);
+}
 
 int32_t Encoder_GetPosition(void)
 {
@@ -873,7 +1027,14 @@ int32_t Encoder_GetPosition(void)
 
 void Encoder_ResetPosition(void)
 {
+    __HAL_TIM_SET_COUNTER(&htim1, 0);
+    printf("Encoder position reset to 0\r\n");
+}
 
+// Auto-reset when encoder overflows (your current approach)
+if (encoderCounts > 30000){
+    __HAL_TIM_SET_COUNTER(&htim1, 0);
+    printf("Encoder auto-reset at overflow\r\n");
 }
 float CalculateTravelDistance(int32_t encoderCounts)
 {
